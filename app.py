@@ -190,6 +190,9 @@ ss.setdefault("alert", None)  # None | "danger" | "fatal"
 ss.setdefault("alert_nodes", None)  # None = 전체, 아니면 영향받는 하위설비 인덱스 목록
 ss.setdefault("alert_msg", "")
 ss.setdefault("pending", None)
+ss.setdefault("pending_fix", None)
+ss.setdefault("last_text", "")
+ss.setdefault("cleared", set())
 
 
 def reset():
@@ -200,6 +203,9 @@ def reset():
     ss.alert_nodes = None
     ss.alert_msg = ""
     ss.pending = None
+    ss.pending_fix = None
+    ss.last_text = ""
+    ss.cleared = set()
 
 
 def select(p):
@@ -223,6 +229,11 @@ def judge_comm(text):
                     action="좌측 도면에서 작업할 부품을 먼저 선택해 주세요.")
     ss.alert_nodes = None
     ss.alert_msg = ""
+    if p == "메인 전원 차단기" and has(text, ["내리", "차단", "끄", "전원"]) and p in ss.cleared:
+        ss.alert = None
+        return dict(kind="warn", intent="메인 전원 차단기 OFF (계획정전, 승인 완료)", verdict="조건부 진행 가능", risk=40,
+                    change="계획정전으로 MSPP #1 및 하위 설비 3종이 일시 중단됨 (사전 통보 완료)",
+                    action="승인된 시간대에 차단기를 조작하고, 복구 후 전원 투입과 통신 복구를 확인하세요.")
     if p == "메인 전원 차단기" and has(text, ["내리", "차단", "끄", "전원"]):
         ss.alert = "fatal"
         return dict(kind="fatal", intent="메인 전원 차단기 OFF 조작",
@@ -270,6 +281,11 @@ def judge_comm(text):
         return dict(kind="warn", intent="UPS 배터리 모듈 교체", verdict="조건부 가능 · 주의", risk=35,
                     change="모듈 1개 탈거 시 백업 시간 단축. 상용전원 정상이면 통신 영향 없음",
                     action="상용전원 정상 확인 후 1개씩 교체하고, 교체 후 충전 및 경보 해제를 확인하세요.")
+    if p == "LTE-R 연결 광점퍼 포트" and has(text, ["뽑", "분리", "교체", "빼", "청소"]) and p in ss.cleared:
+        ss.alert = None
+        return dict(kind="warn", intent="LTE-R 광점퍼 분리/청소 (사전 통보 완료)", verdict="조건부 진행 가능", risk=25,
+                    change="작업 중 3번 승강장 LTE-R만 일시 중단 (관제 통보 완료)",
+                    action="비운행 시간대에 작업하고, 재접속 후 LTE-R 통신 복구를 확인하세요.")
     if p == "LTE-R 연결 광점퍼 포트" and has(text, ["뽑", "분리", "교체", "빼", "청소"]):
         ss.alert = "danger"
         ss.alert_nodes = [0]
@@ -287,6 +303,11 @@ def judge_signal(text):
     P = SIG_PARTS
     bk = ss.is_backup_active
     change_kw = ["뽑", "분리", "교체", "빼"]
+    if p == P[3] and has(text, change_kw + ["끄", "차단", "내리", "전원"]) and p in ss.cleared:
+        ss.alert = None
+        return dict(kind="warn", intent="제어전원 모듈 차단/교체 (관제 승인 완료)", verdict="조건부 진행 가능", risk=40,
+                    change="작업 구간 폐쇄 상태에서 선로전환기 제어전원이 일시 차단됨",
+                    action="승인된 구간·시간에만 작업하고, 복구 후 선로전환기 전환 시험을 실시하세요.")
     if p == P[3] and has(text, change_kw + ["끄", "차단", "내리", "전원"]):
         ss.alert = "fatal"
         return dict(kind="fatal", intent="선로전환기 제어전원 모듈 차단/교체", verdict="작업 불가", risk=100,
@@ -326,6 +347,11 @@ def judge_signal(text):
         return dict(kind="safe", intent="B계 CPU 보드 분리/점검 (A계 운용 중)", verdict="작업 가능 · 안전", risk=15,
                     change="대기계 분리라 운행 영향 없음 (이중계 일시 해제)",
                     action="재장착 후 A/B계 동기화 완료를 반드시 확인하세요.")
+    if p == P[4] and has(text, change_kw) and p in ss.cleared:
+        ss.alert = None
+        return dict(kind="warn", intent="궤도회로 모듈 교체 (구간 폐쇄 완료)", verdict="조건부 진행 가능", risk=25,
+                    change="폐쇄된 T1 구간 점유 표시가 일시 변동될 수 있음 (관제 통보 완료)",
+                    action="교체 후 궤도 표시 정상 복귀와 구간 개방 전 점검을 실시하세요.")
     if p == P[4] and has(text, change_kw):
         ss.alert = "danger"
         ss.alert_nodes = [1]
@@ -349,10 +375,16 @@ def judge(text):
                     action="좌측 도면에서 작업할 부품을 먼저 선택해 주세요.")
     ss.alert_nodes = None
     ss.alert_msg = ""
-    return judge_signal(text) if ss.site == "signal" else judge_comm(text)
+    res = judge_signal(text) if ss.site == "signal" else judge_comm(text)
+    meta = META.get((ss.selected, res["kind"]))
+    if meta:
+        res["steps"] = meta["steps"]
+        res["fix"] = meta.get("fix")
+    return res
 
 
 def handle(text):
+    ss.last_text = text
     ss.messages.append(dict(role="user", text=text))
     with st.spinner("AI가 작업 의도를 분석하고 결과를 예측하는 중..."):
         time.sleep(0.5)
@@ -405,10 +437,102 @@ SITES = {
 S = SITES[ss.site]
 PARTS = S["parts"]
 
+def fx(kind, label, bubble, intent="", change=""):
+    return dict(kind=kind, label=label, bubble=bubble, intent=intent, change=change)
+
+
+META = {
+    # ---- 통신설비
+    ("주회선 광모듈 #1", "danger"): dict(
+        steps=["이중화 수동 절체 스위치로 예비회선 절체", "절체 후 하위 설비 3종 통신 정상 확인", "주회선 광모듈 분리/교체 진행"],
+        fix=fx("switch", "① 예비회선 절체 수행 후 작업 재개", "✅ 선행 조치: 이중화 수동 절체 스위치로 예비회선 절체",
+               "예비회선 수동 절체 수행 (선행 조치)", "트래픽이 예비회선(광모듈 #2)으로 우회됨. 하위 설비 통신 유지")),
+    ("주회선 광모듈 #1", "safe"): dict(
+        steps=["정전기 방지 장갑 착용", "광모듈 분리 후 커넥터 단면 점검/청소", "재장착 후 링크 LED·광레벨 확인", "이중화 스위치로 주회선 복귀 절체"]),
+    ("예비회선 광모듈 #2", "danger"): dict(
+        steps=["이중화 스위치로 주회선 복귀", "주회선 링크·광레벨 정상 확인", "예비 광모듈 분리/점검 진행"],
+        fix=fx("restore", "① 주회선 복귀 절체 후 작업 재개", "✅ 선행 조치: 주회선으로 복귀 절체",
+               "주회선 복귀 절체 수행 (선행 조치)", "트래픽이 주회선으로 복귀. 예비회선은 대기 상태")),
+    ("예비회선 광모듈 #2", "safe"): dict(steps=["예비회선 대기 상태 확인", "모듈 분리·점검", "재장착 후 예비회선 링크 정상 확인"]),
+    ("이중화 수동 절체 스위치", "backup"): dict(
+        steps=["하위 설비 3종 통신 정상 확인", "주회선 광모듈 #1 작업 진행", "작업 완료 후 복귀 절체"]),
+    ("이중화 수동 절체 스위치", "safe"): dict(steps=["주회선 링크 LED·광레벨 확인", "하위 설비 3종 통신 정상 확인"]),
+    ("메인 전원 차단기", "fatal"): dict(
+        steps=["관제센터·상급자에 작업 승인 요청", "하위 설비(LTE-R/행선안내기/CCTV) 중단 통보", "계획정전 시간대 확정", "승인 후 차단기 조작"],
+        fix=fx("clear", "① 승인·통보 완료 후 작업 재개", "✅ 선행 조치: 관제·상급자 승인 및 하위 설비 중단 통보 완료")),
+    ("메인 전원 차단기", "warn"): dict(steps=["승인 시간대 확인", "차단기 OFF 조작", "작업 수행", "전원 투입 후 통신 복구 확인"]),
+    ("UPS 배터리 모듈", "warn"): dict(steps=["상용전원 정상 확인", "모듈 1개 탈거·교체", "충전 상태·경보 해제 확인"]),
+    ("LTE-R 연결 광점퍼 포트", "danger"): dict(
+        steps=["관제센터에 LTE-R 일시 중단 통보", "비운행 시간대 확인", "해당 포트 광점퍼 분리·청소", "재접속 후 LTE-R 통신 복구 확인"],
+        fix=fx("clear", "① 관제 통보 완료 후 작업 재개", "✅ 선행 조치: 관제 통보 및 비운행 시간대 확인 완료")),
+    ("LTE-R 연결 광점퍼 포트", "warn"): dict(steps=["비운행 시간대 작업", "광점퍼 분리·단면 청소", "재접속 후 LTE-R 통신 복구 확인"]),
+    # ---- 신호설비
+    ("운용계(A계) CPU 보드", "danger"): dict(
+        steps=["계 절체 스위치로 B계 절체", "A/B계 동기화 및 표시 정상 확인", "A계 CPU 보드 분리/교체 진행"],
+        fix=fx("switch", "① B계 절체 수행 후 작업 재개", "✅ 선행 조치: 계 절체 스위치로 B계 절체",
+               "B계로 계 절체 수행 (선행 조치)", "연동 기능이 B계(대기계)로 넘어감. 열차 운행 영향 없음")),
+    ("운용계(A계) CPU 보드", "safe"): dict(steps=["정전기 방지 조치", "A계 보드 분리·교체", "재장착 후 A/B계 동기화 확인", "A계 복귀 절체"]),
+    ("대기계(B계) CPU 보드", "danger"): dict(
+        steps=["계 절체 스위치로 A계 복귀", "A/B계 동기화 정상 확인", "B계 CPU 보드 분리/점검 진행"],
+        fix=fx("restore", "① A계 복귀 절체 후 작업 재개", "✅ 선행 조치: A계로 복귀 절체",
+               "A계 복귀 절체 수행 (선행 조치)", "연동 기능이 A계로 복귀. B계는 대기 상태")),
+    ("대기계(B계) CPU 보드", "safe"): dict(steps=["대기계 상태 확인", "B계 보드 분리·점검", "재장착 후 A/B계 동기화 완료 확인"]),
+    ("계 절체 스위치", "backup"): dict(steps=["선로전환기·궤도·신호기 표시 확인", "A계 CPU 보드 작업 진행", "작업 완료 후 A계 복귀"]),
+    ("계 절체 스위치", "safe"): dict(steps=["A/B계 동기화 상태 확인", "진단 LED 확인"]),
+    ("선로전환기 제어전원 모듈", "fatal"): dict(
+        steps=["관제 승인 요청", "작업 구간 폐쇄 및 열차 운행 통제 확인", "승인된 시간대 확정", "제어전원 차단·교체 진행"],
+        fix=fx("clear", "① 관제 승인·구간 폐쇄 후 작업 재개", "✅ 선행 조치: 관제 승인 및 작업 구간 폐쇄 완료")),
+    ("선로전환기 제어전원 모듈", "warn"): dict(steps=["승인 구간·시간 확인", "제어전원 차단·교체", "복구 후 선로전환기 전환 시험"]),
+    ("궤도회로 송수신 모듈", "danger"): dict(
+        steps=["T1 구간 폐쇄", "관제에 통보", "궤도회로 모듈 교체", "점유 표시 정상 복귀 확인 후 구간 개방"],
+        fix=fx("clear", "① 구간 폐쇄·관제 통보 후 작업 재개", "✅ 선행 조치: T1 구간 폐쇄 및 관제 통보 완료")),
+    ("궤도회로 송수신 모듈", "warn"): dict(steps=["폐쇄 구간 확인", "모듈 교체", "점유 표시 복귀 확인 후 구간 개방"]),
+    ("서지보호기(SPD) 모듈", "warn"): dict(steps=["기상 확인", "SPD 모듈 교체", "접지선 체결·접지저항 점검"]),
+}
+
+
+def steps_html(r):
+    if not r.get("steps"):
+        return ""
+    items = "".join(f"<li>{html.escape(x)}</li>" for x in r["steps"])
+    return f'<br><b class="k">작업 절차</b><ol>{items}</ol>'
+
+
+def run_fix(fix):
+    ss.messages.append(dict(role="user", text=fix["bubble"]))
+    with st.spinner("선행 조치를 반영하고 작업을 다시 평가하는 중..."):
+        time.sleep(0.5)
+        if fix["kind"] == "switch":
+            ss.is_backup_active = True
+            ss.alert = None
+            done = dict(kind="backup", intent=fix["intent"], verdict="선행 조치 완료", risk=5,
+                        change=fix["change"], action="이제 원래 작업을 다시 평가합니다.")
+        elif fix["kind"] == "restore":
+            ss.is_backup_active = False
+            ss.alert = None
+            done = dict(kind="safe", intent=fix["intent"], verdict="선행 조치 완료", risk=8,
+                        change=fix["change"], action="이제 원래 작업을 다시 평가합니다.")
+        else:
+            ss.cleared.add(ss.selected)
+            ss.alert = None
+            done = dict(kind="safe", intent="사전 승인·통보 절차 완료", verdict="선행 조치 완료", risk=None,
+                        change="작업에 필요한 사전 절차가 확인됨", action="이제 원래 작업을 다시 평가합니다.")
+        ss.messages.append(dict(role="assistant", card=done))
+        time.sleep(0.5)
+        ss.messages.append(dict(role="assistant", card=judge(ss.last_text)))
+
+
+def queue_fix(fix):
+    ss.pending_fix = fix
+
+
 # input handling first so left panel reflects new state
 if ss.pending:
     t, ss.pending = ss.pending, None
     handle(t)
+if ss.pending_fix:
+    f, ss.pending_fix = ss.pending_fix, None
+    run_fix(f)
 
 # ---------------------------------------------------------------- CSS
 st.markdown(f"""
@@ -435,6 +559,7 @@ header[data-testid="stHeader"] {{ background:transparent; }}
 .card.warn {{ border-left-color:#f59e0b; background:#1f1a0e; }}
 .card.safe {{ border-left-color:#22c55e; background:#0e1f18; }}
 .card.backup {{ border-left-color:#3b82f6; background:#0d1a30; }}
+.card ol {{ margin:4px 0 0 18px; padding:0; }}
 .card b.k {{ color:#8fa3c4; font-weight:600; }}
 .umsg {{ text-align:right; margin:6px 0; }}
 .umsg span {{ background:{BLUE}; color:#fff; padding:6px 12px; border-radius:12px 12px 0 12px;
@@ -567,7 +692,12 @@ with right:
 <b class="k">판정</b> <b>{html.escape(r['verdict'])}</b><br>
 <b class="k">위험도</b> {risk}<br>
 <b class="k">예상 변화</b> {html.escape(r['change'])}<br>
-<b class="k">권장 조치</b> {html.escape(r['action'])}</div>""", unsafe_allow_html=True)
+<b class="k">권장 조치</b> {html.escape(r['action'])}{steps_html(r)}</div>""", unsafe_allow_html=True)
+
+    last = ss.messages[-1]["card"] if ss.messages and ss.messages[-1]["role"] == "assistant" else None
+    if last and last.get("fix"):
+        st.button("▶ " + last["fix"]["label"], key=f"fix_{len(ss.messages)}", on_click=queue_fix,
+                  args=(last["fix"],), type="primary", use_container_width=True)
 
     if prompt := st.chat_input(S["placeholder"]):
         queue(prompt)
